@@ -272,7 +272,7 @@ class SimpleQA:
         """
         async with MCPServerStdio(
             name="Playwright MCP server",
-            params={"command": "npx", "args": ["-y", "@playwright/mcp"]},
+            params={"command": "/usr/bin/npx", "args": ["-y", "@playwright/mcp"]},
             client_session_timeout_seconds=30,
         ) as server:
             try:
@@ -344,48 +344,6 @@ class SimpleQA:
                 print(f"錯誤類型: {type(e)}")
                 logger.error(f"執行錯誤: {e}", exc_info=True)
                 return f"處理您的問題時遇到了困難，就像《Re:Zero》中的昴一樣，讓我們重新開始吧！\n\n來自... [Re:Zero]\n\n錯誤詳情: {str(e)}"
-
-    async def run_streaming(self, question: str, user_id: str = None, group_id: str = None
-    ) -> str:
-        """
-        Run the agent with streaming response.
-
-        Args:
-            question (str): The question to ask the agent.
-
-        Yields:
-            str: Partial responses as they are generated.
-        """
-
-        # 創建 Mem0Context
-        print(f"創建 Mem0Context: user_id={user_id}, group_id={group_id}")
-        context = Mem0Context(user_id=user_id, group_id=group_id)
-        try:
-            result = Runner.run_streamed(
-                self.triage_agent,
-                input=question,
-                context=context,
-            )
-
-            # 使用 stream_events 來獲取事件流
-            async for event in result.stream_events():
-                # 過濾出文字增量事件
-                if event.type == "raw_response_event" and hasattr(event, "data"):
-                    if (
-                        hasattr(event.data, "type")
-                        and event.data.type == "response.output_text.delta"
-                    ):
-                        if hasattr(event.data, "delta"):
-                            yield event.data.delta
-
-        except RateLimitError:
-            yield "抱歉，AI 服務暫時無法使用，請稍後再試。就像《鋼之鍊金術師》中的等價交換法則一樣，我們需要補充能量才能繼續為您服務！\n\n來自... [鋼之鍊金術師]"
-        except Exception as e:
-            print(f"Streaming 錯誤詳情: {e}")
-            print(f"錯誤類型: {type(e)}")
-            logger.error(f"Streaming 錯誤詳情: {e}", exc_info=True)
-            yield f"處理您的問題時遇到了困難，就像《Re:Zero》中的昴一樣，讓我們重新開始吧！\n\n來自... [Re:Zero]"
-
 
 if __name__ == "__main__":
 

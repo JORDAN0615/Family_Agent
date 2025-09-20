@@ -15,6 +15,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends nodejs \
   && npm install -g @playwright/mcp \
   && npm cache clean --force \
+  && ln -sf /usr/bin/npx /usr/local/bin/npx \
   && rm -rf /var/lib/apt/lists/*
 
 # 安裝 uv
