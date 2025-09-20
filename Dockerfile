@@ -22,7 +22,7 @@ RUN uv venv .venv \
 
 # 設定環境變數
 ENV PYTHONUNBUFFERED=1
-ENV PORT=8000
+ENV PORT=8080
 ENV ENVIRONMENT=production
 
 # 使用環境變數控制啟動方式
