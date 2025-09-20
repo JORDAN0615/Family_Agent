@@ -273,7 +273,7 @@ class SimpleQA:
         async with MCPServerStdio(
             name="Playwright MCP server",
             params={"command": "/usr/bin/npx", "args": ["-y", "@playwright/mcp"]},
-            client_session_timeout_seconds=30,
+            client_session_timeout_seconds=120,
         ) as server:
             try:
                 print(f"開始處理問題: {question[:50]}...")

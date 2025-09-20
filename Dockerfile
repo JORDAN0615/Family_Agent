@@ -14,6 +14,7 @@ RUN apt-get update \
   && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && npm install -g @playwright/mcp \
+  && npx playwright install chromium \
   && npm cache clean --force \
   && ln -sf /usr/bin/npx /usr/local/bin/npx \
   && rm -rf /var/lib/apt/lists/*
