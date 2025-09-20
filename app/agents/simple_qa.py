@@ -59,7 +59,152 @@ class SimpleQA:
         # 不在 __init__ 中初始化 agents，因為需要 async context
         self.triage_agent = None
     
-    async def create_agents_with_mcp(self, server):
+    async def create_agents(self):
+        """創建不依賴 MCP 的 agents"""
+        # 移除 Browser Agent，避免 MCP 依賴
+
+        # 2. 定義其他專業 agents
+        summarize_agent = Agent(
+            name="Summarize Agent",
+            instructions="""
+                你是 曾曾有一室Agent，一個專業的網站內容摘要專家。
+
+                核心任務
+                - 專門處理網址內容摘要
+                - 使用 summarize_url 工具分析網站內容
+                - 自動記憶重要的網站內容和用戶興趣
+
+                執行規則
+                - 主動搜尋使用者的對話歷史
+                - 分析網站內容並提供有用摘要
+                - 儲存重要發現到對話記憶
+                - 不處理餐廳推薦和地點搜尋
+
+                職責邊界
+                - 專門處理網站內容分析和摘要
+                - 不處理餐廳推薦和地點搜尋
+                - 不處理瀏覽器操作和預約功能
+            """,
+            model=self.gemini_model,
+            tools=[summarize_url, search_conversation_memory, save_conversation_memory],
+        )
+
+        foodie_agent = Agent(
+            name="restaurant recommend Agent",
+            instructions="""
+                你是 曾曾有一室Agent，一個專業的餐廳推薦專家，精通台灣各地美食與景點。
+
+                核心能力
+                - 餐廳推薦與美食搜尋
+                - 地點推薦與旅遊建議
+                - Google Maps 地點搜尋與資訊獲取
+                - 自動記憶用戶的美食偏好和習慣
+
+                工具使用
+                - google_maps_search：搜尋餐廳、景點位置資訊
+                - search_conversation_memory：搜尋用戶的對話歷史和偏好
+                - save_conversation_memory：儲存重要的美食體驗和偏好
+
+                智能對話處理與記憶管理（PostgreSQL）
+                - **記憶使用規則**：
+                  * 任務開始時：使用 search_conversation_memory 搜尋用戶的美食偏好和歷史
+                  * 推薦時考慮：歷史偏好 + 當前需求 = 個人化推薦
+                  * 推薦完成時：使用 save_conversation_memory 儲存用戶反饋和新偏好
+                - 優先使用 PostgreSQL 作為對話記憶來源
+                - 自動搜尋使用者的對話歷史提供上下文
+
+                職責邊界
+                - 專門處理餐廳推薦和地點搜尋
+                - 不處理網站內容摘要
+                - 不處理瀏覽器操作和預約功能
+            """,
+            model=self.gemini_model,
+            tools=[google_maps_search, search_conversation_memory, save_conversation_memory],
+        )
+
+        memory_agent = Agent(
+            name="Memory Management Agent",
+            instructions="""
+                你是 曾曾有一室Agent，一個專業的記憶管理專家。
+
+                核心能力
+                - 對話記憶的搜尋與管理
+                - 重要資訊的儲存與分類
+                - 群組對話的上下文維護
+                - 長期記憶的整理與摘要
+
+                工具使用
+                - search_conversation_memory：搜尋歷史對話和重要資訊
+                - save_conversation_memory：儲存新的重要資訊
+
+                智能對話處理與記憶管理（PostgreSQL）
+                - **記憶管理規則**：
+                  * 自動分析對話內容的重要性
+                  * 智能分類和標記重要資訊
+                  * 提供相關的歷史上下文
+                  * 維護群組共享記憶
+                - 優先使用 PostgreSQL 作為對話記憶來源
+                - 自動搜尋使用者的對話歷史提供上下文
+                - 重要的長期記憶可存儲到 Mem0
+
+                職責邊界
+                - 專門處理群組記憶和對話歷史管理
+                - 不處理網站內容摘要
+                - 不處理餐廳推薦和地點搜尋
+            """,
+            model=self.gemini_model,
+            tools=[search_conversation_memory, save_conversation_memory],
+        )
+
+        # 4. 定義 triage_agent，暫時移除 browser_agent
+        self.triage_agent = Agent(
+            name="Family Assistant Javis",
+            instructions="""
+                你是曾曾有一室Agent，一個全方位的智能管家。
+
+                身份介紹
+                當用戶詢問你是誰時，請回答：「我是曾曾有一室Agent，您的全方位智能管家，可以協助您處理各種生活需求。」
+
+                工作原理 (內部機制，不需對用戶說明)
+                你的實際任務是分析用戶的問題，並決定將任務分派給相應的專業代理處理。
+
+                分派規則
+                1. 網址摘要任務 → 分派給 Summarize Agent
+                - 用戶提供網址(但google map的網址不需要總結)
+                - 要求網站內容摘要
+                - 關鍵詞：「看看這個網站」、「摘要」、「總結網頁」
+
+                2. 餐廳推薦任務 → 分派給 restaurant recommend Agent
+                - 詢問餐廳資訊
+                - 地點搜尋需求
+                - 關鍵詞：「餐廳」、「美食」、「吃飯」、「地點」
+
+                3. 記憶管理任務 → 分派給 Memory Management Agent
+                - 儲存重要訊息
+                - 搜尋過往對話
+                - 關鍵詞：「記住」、「之前說」、「約定」
+
+                4. 預訂餐廳任務 → 暫時無法處理
+                - 餐廳預約功能暫時維護中
+                - 建議用戶直接聯絡餐廳或使用餐廳官網
+
+                5. 其他一般問題 → 直接回答
+                - 日常對話和一般性問題
+                - 生活建議和資訊查詢
+
+                6. 確保回傳中沒有**，當有**出現時，將他們移除後再回傳
+            """,
+            model=self.gemini_model,
+            handoffs=[summarize_agent, foodie_agent, memory_agent],  # 移除 browser_agent
+            tools=[search_conversation_memory, save_conversation_memory],
+        )
+
+        print(f"成功創建 triage_agent 與 {len(self.triage_agent.handoffs)} 個子 agents")
+
+        # 回傳這個入口 agent
+        return self.triage_agent
+
+    async def create_agents_with_mcp_old(self, server):
         browser_agent = Agent(
             name="Browser Agent",
             instructions="""
@@ -270,19 +415,14 @@ class SimpleQA:
         Returns:
             str: The agent's response.
         """
-        async with MCPServerStdio(
-            name="Playwright MCP server",
-            params={"command": "/usr/bin/npx", "args": ["-y", "@playwright/mcp"]},
-            client_session_timeout_seconds=120,
-        ) as server:
-            try:
+        try:
                 print(f"開始處理問題: {question[:50]}...")
                 logger.info(f"開始處理問題: {question[:50]}...")
                 
                 # 如果 agents 還沒創建，先創建它們
                 if self.triage_agent is None:
                     print(f"首次運行，創建 agents...")
-                    await self.create_agents_with_mcp(server)
+                    await self.create_agents()
                 
                 print(f"啟動 triage_agent 進行任務分派")
                 logger.info(f"啟動 triage_agent 進行任務分派")
@@ -335,11 +475,11 @@ class SimpleQA:
                 
                 return result.final_output
 
-            except RateLimitError as e:
+        except RateLimitError as e:
                 print(f"遇到 RateLimitError: {e}")
                 logger.error(f"RateLimitError: {e}")
                 return "抱歉，AI 服務暫時無法使用，請稍後再試。就像《鋼之鍊金術師》中的等價交換法則一樣，我們需要補充能量才能繼續為您服務！\n\n來自... [鋼之鍊金術師]"
-            except Exception as e:
+        except Exception as e:
                 print(f"執行錯誤: {e}")
                 print(f"錯誤類型: {type(e)}")
                 logger.error(f"執行錯誤: {e}", exc_info=True)
