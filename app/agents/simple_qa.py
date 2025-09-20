@@ -119,7 +119,7 @@ class SimpleQA:
                 - 不處理瀏覽器操作和預約功能
             """,
             model=self.gemini_model,
-            tools=[google_maps_search, search_conversation_memory, save_conversation_memory],
+            tools=[search_places_tool, search_conversation_memory, save_conversation_memory],
         )
 
         memory_agent = Agent(
