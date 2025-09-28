@@ -6,7 +6,9 @@ from agents import (
     set_tracing_disabled,
     OpenAIChatCompletionsModel,
 )
+from agents import RunHooks
 import logging
+import asyncpg
 from openai import AsyncOpenAI, RateLimitError
 from .tools import (
     summarize_url,
@@ -41,27 +43,121 @@ gemini_client = AsyncOpenAI(
     base_url=GEMINI_BASE_URL, api_key=agent_settings.GEMINI_API_KEY
 )
 local_client = AsyncOpenAI(base_url="http://localhost:11434/v1", api_key="dummy")
+openai_client = AsyncOpenAI(api_key=agent_settings.OPENAI_API_KEY)
 
+
+# Task Plan Logging Hooks
+class TaskPlanLoggingHooks(RunHooks):
+    """用於追蹤 Agent 執行流程的 Hooks"""
+    
+    async def on_agent_start(self, context, agent):
+        logger.info(f"Agent 啟動: {agent.name}")
+    
+    async def on_handoff(self, context, from_agent, to_agent):
+        logger.info(f"Agent 切換: {from_agent.name} → {to_agent.name}")
+    
+    async def on_tool_start(self, context, agent, tool):
+        tool_name = getattr(tool, 'name', str(tool))
+        logger.info(f"工具呼叫開始: {agent.name} → {tool_name}")
+    
+    async def on_tool_end(self, context, agent, tool, result):
+        tool_name = getattr(tool, 'name', str(tool))
+        result_preview = result[:100] + "..." if len(result) > 100 else result
+        logger.info(f"工具呼叫完成: {tool_name}")
+    
+    async def on_llm_start(self, context, agent, system_prompt, input_items):
+        logger.info(f"LLM 開始: {agent.name}")
+    
+    async def on_llm_end(self, context, agent, response):
+        logger.info(f"LLM 完成: {agent.name}")
 
 
 class SimpleQA:
     def __init__(self):
-        self.gemini_model = OpenAIChatCompletionsModel(
-            model="gemini-2.5-pro",
-            openai_client=gemini_client,
-        )
-
-        # self.local_model = OpenAIChatCompletionsModel(
-        #     model="gpt-oss:20b",
-        #     openai_client=local_client,
-        # )
-
-        # 不在 __init__ 中初始化 agents，因為需要 async context
+        # 延遲初始化，避免在導入時建立連線
+        self.gemini_model = None
         self.triage_agent = None
+        self.db_url = agent_settings.DATABASE_URL
+        self._initialized = False
+
+    def _init_model(self):
+        """延遲初始化模型"""
+        if self.gemini_model is None:
+            self.gemini_model = OpenAIChatCompletionsModel(
+                model="gpt-4o-mini",
+                openai_client=openai_client,
+            )
+
+    # -------- 上下文記憶系統 -------- #
+    
+    async def init_memory_db(self):
+        """初始化對話記憶資料庫表"""
+        conn = await asyncpg.connect(self.db_url)
+        try:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_history (
+                    id SERIAL PRIMARY KEY,
+                    user_input TEXT NOT NULL,
+                    agent_output TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            logger.info("對話記憶表初始化完成")
+        finally:
+            await conn.close()
+    
+    async def get_context(self) -> str:
+        """獲取最近5筆對話作為上下文字串"""
+        logger.info(f"[MEMORY] 開始獲取對話記憶，資料庫URL: {self.db_url}")
+        conn = await asyncpg.connect(self.db_url)
+        try:
+            logger.info(f"[MEMORY] 資料庫連線成功，執行查詢...")
+            rows = await conn.fetch(
+                "SELECT user_input, agent_output FROM conversation_history ORDER BY created_at DESC LIMIT 2"
+            )
+            logger.info(f"[MEMORY] 查詢完成，找到 {len(rows)} 筆記錄")
+
+            if not rows:
+                logger.info(f"[MEMORY] 沒有找到任何對話記錄")
+                return ""
+
+            # 詳細記錄每筆資料
+            for i, row in enumerate(rows):
+                logger.info(f"[MEMORY] 記錄 {i+1}: user_input='{row['user_input'][:50]}...', agent_output='{row['agent_output'][:50]}...'")
+
+            # 組成對話歷史字串
+            context_lines = ["=== 最近的對話記錄 ==="]
+            for row in reversed(rows):  # 反轉以保持時間順序
+                context_lines.append(f"用戶: {row['user_input'][:100]}...")  # 限制用戶輸入長度
+                context_lines.append(f"助理: {row['agent_output'][:100]}...")  # 限制助理回應長度
+                context_lines.append("---")
+
+            result = "\n".join(context_lines)
+            logger.info(f"[MEMORY] 組成的上下文長度: {len(result)} 字符")
+            logger.info(f"[MEMORY] 上下文內容預覽: {result[:200]}...")
+            return result
+        finally:
+            await conn.close()
+            logger.info(f"[MEMORY] 資料庫連線已關閉")
+    
+    async def save_conversation(self, user_input: str, agent_output: str):
+        """保存對話記錄"""
+        conn = await asyncpg.connect(self.db_url)
+        try:
+            await conn.execute(
+                "INSERT INTO conversation_history (user_input, agent_output) VALUES ($1, $2)",
+                user_input, agent_output
+            )
+            logger.info("對話記錄已保存")
+        finally:
+            await conn.close()
+
+        
     
     async def create_agents(self):
         """創建不依賴 MCP 的 agents"""
-        # 移除 Browser Agent，避免 MCP 依賴
+        # 確保模型已初始化
+        self._init_model()
 
         # 2. 定義其他專業 agents
         summarize_agent = Agent(
@@ -86,7 +182,7 @@ class SimpleQA:
                 - 不處理瀏覽器操作和預約功能
             """,
             model=self.gemini_model,
-            tools=[summarize_url, search_conversation_memory, save_conversation_memory],
+            tools=[summarize_url],
         )
 
         foodie_agent = Agent(
@@ -119,7 +215,7 @@ class SimpleQA:
                 - 不處理瀏覽器操作和預約功能
             """,
             model=self.gemini_model,
-            tools=[search_places_tool, search_conversation_memory, save_conversation_memory],
+            tools=[search_places_tool],
         )
 
         memory_agent = Agent(
@@ -195,11 +291,10 @@ class SimpleQA:
                 6. 確保回傳中沒有**，當有**出現時，將他們移除後再回傳
             """,
             model=self.gemini_model,
-            handoffs=[summarize_agent, foodie_agent, memory_agent],  # 移除 browser_agent
-            tools=[search_conversation_memory, save_conversation_memory],
+            handoffs=[summarize_agent, foodie_agent],  # 移除 browser_agent
         )
 
-        print(f"成功創建 triage_agent 與 {len(self.triage_agent.handoffs)} 個子 agents")
+        logger.info(f"成功創建 triage_agent 與 {len(self.triage_agent.handoffs)} 個子 agents")
 
         # 回傳這個入口 agent
         return self.triage_agent
@@ -296,7 +391,7 @@ class SimpleQA:
                 請始終保持專業、準確、簡潔的回應風格。
             """,
             model=self.gemini_model,
-            tools=[summarize_url, search_conversation_memory, save_conversation_memory],
+            tools=[summarize_url],
         )
 
         foodie_agent = Agent(
@@ -394,14 +489,20 @@ class SimpleQA:
             5. 確保回傳中沒有**，當有**出現時，將他們移除後再回傳
             """,
             model=self.gemini_model,
-            handoffs=[summarize_agent, foodie_agent, memory_agent, browser_agent],
-            tools=[search_conversation_memory, save_conversation_memory],
+            handoffs=[summarize_agent, foodie_agent, browser_agent],
         )
         
-        print(f"成功創建 triage_agent 與 {len(self.triage_agent.handoffs)} 個子 agents")
+        logger.info(f"成功創建 triage_agent 與 {len(self.triage_agent.handoffs)} 個子 agents")
         
         # 回傳這個入口 agent
         return self.triage_agent
+
+    async def init_memory_system(self):
+        """初始化對話記憶資料庫"""
+        try:
+            await self.init_memory_db()
+        except Exception as e:
+            logger.error(f"記憶資料庫初始化失敗: {str(e)}")
 
     async def run(
         self, question: str, user_id: str = None, group_id: str = None
@@ -415,73 +516,125 @@ class SimpleQA:
         Returns:
             str: The agent's response.
         """
+
         try:
-                print(f"開始處理問題: {question[:50]}...")
-                logger.info(f"開始處理問題: {question[:50]}...")
-                
-                # 如果 agents 還沒創建，先創建它們
-                if self.triage_agent is None:
-                    print(f"首次運行，創建 agents...")
-                    await self.create_agents()
-                
-                print(f"啟動 triage_agent 進行任務分派")
-                logger.info(f"啟動 triage_agent 進行任務分派")
 
-                # 1. 搜尋對話歷史上下文
-                print(f"搜尋對話歷史上下文: user_id={user_id}")
-                conversation_context = ""
-                if user_id:
-                    try:
-                        conversation_context = await search_context(user_id)
-                        print(f"找到上下文長度: {len(conversation_context)}")
-                    except Exception as e:
-                        print(f"搜尋上下文失敗: {e}")
-                        logger.error(f"搜尋上下文失敗: {e}")
+            # 初始化對話記憶資料庫
+            try:
+                await self.init_memory_system()
+            except Exception as e:
+                logger.error(f"記憶資料庫初始化失敗: {str(e)}")
 
-                # 2. 創建 PostgreSQL Context（完全替換 Mem0Context）
-                print(f"創建 PostgreSQL Context: user_id={user_id}, group_id={group_id}")
-                context = PostgreSQLContext(user_id=user_id, group_id=group_id)
+            logger.info(f"開始處理問題: {question[:50]}...")
 
-                # 3. 將對話歷史加入到輸入中
-                enhanced_question = question
-                if conversation_context:
-                    enhanced_question = f"{conversation_context}\n\n新問題: {question}"
+            # 如果 agents 還沒創建，先創建它們
+            if self.triage_agent is None:
+                await self.create_agents()
 
-                print(f"開始執行 Runner.run...")
-                result = await Runner.run(
+            logger.info(f"啟動 triage_agent 進行任務分派")
+
+            # 獲取對話上下文記憶
+            memory_context = ""  # 初始化默認值
+            try:
+                    logger.info(f" [MEMORY] 開始呼叫 get_context()...")
+                    memory_context = await self.get_context()
+                    logger.info(f" [MEMORY] get_context() 執行完成，返回長度: {len(memory_context)}")
+
+                    if memory_context:
+                        # 檢查總長度，防止 token 超限
+                        total_chars = len(memory_context) + len(question)
+                        if total_chars > 100000:  # 約 25k tokens，留足空間
+                            logger.info(f" [MEMORY] 內容過長 ({total_chars} 字符)，跳過記憶載入")
+                            memory_context = ""
+                    else:
+                        logger.info(f" [MEMORY] 無歷史對話記錄")
+                        memory_context = ""
+            except Exception as e:
+                    logger.error(f"獲取對話記憶失敗: {str(e)}")
+                    logger.error(f"錯誤詳情: {type(e).__name__}: {e}")
+                    import traceback
+                    logger.error(f"錯誤堆疊: {traceback.format_exc()}")
+                    memory_context = ""  # 確保異常時也有默認值
+
+                # # 1. 搜尋對話歷史上下文
+                # print(f"搜尋對話歷史上下文: user_id={user_id}")
+                # conversation_context = ""
+                # if user_id:
+                #     try:
+                #         conversation_context = await search_context(user_id)
+                #         print(f"找到上下文長度: {len(conversation_context)}")
+                #     except Exception as e:
+                #         print(f"搜尋上下文失敗: {e}")
+                #         logger.error(f"搜尋上下文失敗: {e}")
+
+                # # 2. 創建 PostgreSQL Context（完全替換 Mem0Context）
+                # print(f"創建 PostgreSQL Context: user_id={user_id}, group_id={group_id}")
+                # context = PostgreSQLContext(user_id=user_id, group_id=group_id)
+
+                # # 3. 將對話歷史加入到輸入中
+                # enhanced_question = question
+                # if conversation_context:
+                #     enhanced_question = f"{conversation_context}\n\n新問題: {question}"
+
+                # 4. 設置 Task Plan Logging Hooks
+            hook = TaskPlanLoggingHooks()
+
+            # 將記憶上下文與當前問題組合
+            enhanced_input = question
+            if memory_context and memory_context.strip():
+                enhanced_input = f"{memory_context}\n\n當前問題: {question}"
+                logger.info(f" [MEMORY] 使用增強輸入，總長度: {len(enhanced_input)} 字符")
+            else:
+                logger.info(f" [MEMORY] 沒有歷史記憶，使用原始問題")
+            result = await Runner.run(
                     self.triage_agent,
-                    input=enhanced_question,  # 使用包含歷史的問題
-                    context=context,  # 使用正確的 Context 物件
+                    input=enhanced_input,  # 使用包含歷史的完整輸入
                     max_turns=30,
-                )
+                    hooks=hook,
+            )
 
                 
-                logger.info(f"最後調用：{result.last_agent.name}")
-                logger.info(f"任務完成，最終輸出: {result.final_output[:100]}...")
+            logger.info(f"Triage Agent 處理完成，結果類型: {type(result)}")
+            logger.info(f"完整 result 物件：{result}")
                 
-                # 4. 儲存對話記錄到 PostgreSQL
-                if user_id and result.final_output:
+            # 抽出最後的 assistant 回覆
+            if hasattr(result, "messages") and result.messages:
+                    logger.info(f"找到 messages，數量: {len(result.messages)}")
+                    for message in reversed(result.messages):
+                        if getattr(message, "role", None) == "assistant":
+                            logger.info(f"返回 assistant message: {message.content[:100]}...")
+                            return message.content
+                    logger.info(f"返回最後一條 message: {result.messages[-1].content[:100]}...")
+                    return result.messages[-1].content
+
+            if hasattr(result, "final_output"):
+                    logger.info(f"返回 final_output: {result.final_output}")
+
+                    # 保存對話記憶
                     try:
-                        success = await update_context(
-                            user_id=user_id,
-                            group_id=group_id,
-                            user_input=question,  # 儲存原始問題，不包含上下文
-                            ai_response=result.final_output
-                        )
-                        print(f"對話記錄儲存結果: {success}")
+                        await self.save_conversation(question, result.final_output)
+                        logger.info(f"對話記錄已保存")
                     except Exception as e:
-                        print(f"儲存對話記錄失敗: {e}")
-                        logger.error(f"儲存對話記錄失敗: {e}")
-                
-                return result.final_output
+                        logger.error(f"保存對話記憶失敗: {str(e)}")
+
+                    return result.final_output
+
+            if hasattr(result, "content"):
+                    logger.info(f"返回 content: {result.content}")
+
+                    # 保存對話記憶
+                    try:
+                        await self.save_conversation(question, result.content)
+                        logger.info(f"對話記錄已保存")
+                    except Exception as e:
+                        logger.error(f"保存對話記憶失敗: {str(e)}")
+
+                    return result.content
 
         except RateLimitError as e:
-                print(f"遇到 RateLimitError: {e}")
                 logger.error(f"RateLimitError: {e}")
                 return "抱歉，AI 服務暫時無法使用，請稍後再試。就像《鋼之鍊金術師》中的等價交換法則一樣，我們需要補充能量才能繼續為您服務！\n\n來自... [鋼之鍊金術師]"
         except Exception as e:
-                print(f"執行錯誤: {e}")
-                print(f"錯誤類型: {type(e)}")
                 logger.error(f"執行錯誤: {e}", exc_info=True)
                 return f"處理您的問題時遇到了困難，就像《Re:Zero》中的昴一樣，讓我們重新開始吧！\n\n來自... [Re:Zero]\n\n錯誤詳情: {str(e)}"
 

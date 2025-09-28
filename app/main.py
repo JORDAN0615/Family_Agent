@@ -25,3 +25,13 @@ app.include_router(line.router)
 def read_root():
     logger.info("Root endpoint accessed")
     return {"Hello": "World"}
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for Cloud Run"""
+    return {"status": "healthy", "service": "Family Agent"}
+
+@app.get("/ready")
+def readiness_check():
+    """Readiness check - indicates if app is ready to serve traffic"""
+    return {"status": "ready", "service": "Family Agent"}
