@@ -74,25 +74,19 @@ class TaskPlanLoggingHooks(RunHooks):
 
 class SimpleQA:
     def __init__(self):
-        # self.gemini_model = OpenAIChatCompletionsModel(
-        #     model="gemini-2.5-flash",
-        #     openai_client=gemini_client,
-        # )
-
-        self.gemini_model = OpenAIChatCompletionsModel(
-            model="gpt-4o-mini",
-            openai_client=openai_client,
-        )
-
-        # self.local_model = OpenAIChatCompletionsModel(
-        #     model="gpt-oss:20b",
-        #     openai_client=local_client,
-        # )
-
-        # 不在 __init__ 中初始化 agents，因為需要 async context
+        # 延遲初始化，避免在導入時建立連線
+        self.gemini_model = None
         self.triage_agent = None
-        # 上下文記憶系統
         self.db_url = agent_settings.DATABASE_URL
+        self._initialized = False
+
+    def _init_model(self):
+        """延遲初始化模型"""
+        if self.gemini_model is None:
+            self.gemini_model = OpenAIChatCompletionsModel(
+                model="gpt-4o-mini",
+                openai_client=openai_client,
+            )
 
     # -------- 上下文記憶系統 -------- #
     
@@ -162,7 +156,8 @@ class SimpleQA:
     
     async def create_agents(self):
         """創建不依賴 MCP 的 agents"""
-        # 移除 Browser Agent，避免 MCP 依賴
+        # 確保模型已初始化
+        self._init_model()
 
         # 2. 定義其他專業 agents
         summarize_agent = Agent(
