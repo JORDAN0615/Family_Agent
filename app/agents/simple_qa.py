@@ -491,111 +491,147 @@ class SimpleQA:
         Returns:
             str: The agent's response.
         """
-        async with MCPServerStdio(
-            name="Playwright MCP server",
-            params={"command": "npx", "args": ["-y", "@playwright/mcp"]},
-            client_session_timeout_seconds=30,
-        ) as server:
-            try:
-
-                # 初始化對話記憶資料庫
+        try:
+            async with MCPServerStdio(
+                name="Playwright MCP server",
+                params={"command": "npx", "args": ["-y", "@playwright/mcp"]},
+                client_session_timeout_seconds=120,  # 增加到 2 分鐘
+            ) as server:
                 try:
-                    await self.init_memory_system()
-                except Exception as e:
-                    logger.error(f"記憶資料庫初始化失敗: {str(e)}")
+                    # 初始化對話記憶資料庫
+                    try:
+                        await self.init_memory_system()
+                    except Exception as e:
+                        logger.error(f"記憶資料庫初始化失敗: {str(e)}")
 
-                logger.info(f"開始處理問題: {question[:50]}...")
+                    logger.info(f"開始處理問題: {question[:50]}...")
 
-                # 如果 agents 還沒創建，先創建它們
-                if self.triage_agent is None:
-                    await self.create_agents_with_mcp_old(server)
+                    # 如果 agents 還沒創建，先創建它們
+                    if self.triage_agent is None:
+                        await self.create_agents_with_mcp_old(server)
 
-                logger.info(f"啟動 triage_agent 進行任務分派")
+                    logger.info(f"啟動 triage_agent 進行任務分派")
 
-                # 獲取對話上下文記憶
-                memory_context = ""  # 初始化默認值
-                try:
-                        logger.info(f" [MEMORY] 開始呼叫 get_context()...")
-                        memory_context = await self.get_context()
-                        logger.info(f" [MEMORY] get_context() 執行完成，返回長度: {len(memory_context)}")
+                    # 獲取對話上下文記憶
+                    memory_context = ""  # 初始化默認值
+                    try:
+                            logger.info(f" [MEMORY] 開始呼叫 get_context()...")
+                            memory_context = await self.get_context()
+                            logger.info(f" [MEMORY] get_context() 執行完成，返回長度: {len(memory_context)}")
 
-                        if memory_context:
-                            # 檢查總長度，防止 token 超限 - 更嚴格的限制
-                            total_chars = len(memory_context) + len(question)
-                            if total_chars > 10000:  # 約 2.5k tokens，為截圖和其他內容留足空間
-                                logger.info(f" [MEMORY] 內容過長 ({total_chars} 字符)，跳過記憶載入")
+                            if memory_context:
+                                # 檢查總長度，防止 token 超限 - 更嚴格的限制
+                                total_chars = len(memory_context) + len(question)
+                                if total_chars > 10000:  # 約 2.5k tokens，為截圖和其他內容留足空間
+                                    logger.info(f" [MEMORY] 內容過長 ({total_chars} 字符)，跳過記憶載入")
+                                    memory_context = ""
+                            else:
+                                logger.info(f" [MEMORY] 無歷史對話記錄")
                                 memory_context = ""
-                        else:
-                            logger.info(f" [MEMORY] 無歷史對話記錄")
-                            memory_context = ""
+                    except Exception as e:
+                            logger.error(f"獲取對話記憶失敗: {str(e)}")
+                            logger.error(f"錯誤詳情: {type(e).__name__}: {e}")
+                            import traceback
+                            logger.error(f"錯誤堆疊: {traceback.format_exc()}")
+                            memory_context = ""  # 確保異常時也有默認值
+
+                    # 設置 Task Plan Logging Hooks
+                    hook = TaskPlanLoggingHooks()
+
+                    # 將記憶上下文與當前問題組合
+                    enhanced_input = question
+                    if memory_context and memory_context.strip():
+                        enhanced_input = f"{memory_context}\n\n當前問題: {question}"
+                        logger.info(f" [MEMORY] 使用增強輸入，總長度: {len(enhanced_input)} 字符")
+                    else:
+                        logger.info(f" [MEMORY] 沒有歷史記憶，使用原始問題")
+                    result = await Runner.run(
+                            self.triage_agent,
+                            input=enhanced_input,  # 使用包含歷史的完整輸入
+                            max_turns=30,
+                            hooks=hook,
+                    )
+
+                    logger.info(f"Triage Agent 處理完成，結果類型: {type(result)}")
+                    logger.info(f"完整 result 物件：{result}")
+
+                    # 抽出最後的 assistant 回覆
+                    if hasattr(result, "messages") and result.messages:
+                            logger.info(f"找到 messages，數量: {len(result.messages)}")
+                            for message in reversed(result.messages):
+                                if getattr(message, "role", None) == "assistant":
+                                    logger.info(f"返回 assistant message: {message.content[:100]}...")
+                                    return message.content
+                            logger.info(f"返回最後一條 message: {result.messages[-1].content[:100]}...")
+                            return result.messages[-1].content
+
+                    if hasattr(result, "final_output"):
+                            logger.info(f"返回 final_output: {result.final_output}")
+
+                            # 保存對話記憶
+                            try:
+                                await self.save_conversation(question, result.final_output)
+                                logger.info(f"對話記錄已保存")
+                            except Exception as e:
+                                logger.error(f"保存對話記憶失敗: {str(e)}")
+
+                            return result.final_output
+
+                    if hasattr(result, "content"):
+                            logger.info(f"返回 content: {result.content}")
+
+                            # 保存對話記憶
+                            try:
+                                await self.save_conversation(question, result.content)
+                                logger.info(f"對話記錄已保存")
+                            except Exception as e:
+                                logger.error(f"保存對話記憶失敗: {str(e)}")
+
+                            return result.content
+
+                except RateLimitError as e:
+                    logger.error(f"RateLimitError: {e}")
+                    return "抱歉，AI 服務暫時無法使用，請稍後再試。就像《鋼之鍊金術師》中的等價交換法則一樣，我們需要補充能量才能繼續為您服務！\n\n來自... [鋼之鍊金術師]"
                 except Exception as e:
-                        logger.error(f"獲取對話記憶失敗: {str(e)}")
-                        logger.error(f"錯誤詳情: {type(e).__name__}: {e}")
-                        import traceback
-                        logger.error(f"錯誤堆疊: {traceback.format_exc()}")
-                        memory_context = ""  # 確保異常時也有默認值
+                    logger.error(f"執行錯誤: {e}", exc_info=True)
+                    return f"處理您的問題時遇到了困難，就像《Re:Zero》中的昴一樣，讓我們重新開始吧！\n\n來自... [Re:Zero]\n\n錯誤詳情: {str(e)}"
+
+        except Exception as mcp_error:
+            # MCP 初始化失敗，使用不需要 MCP 的 agents
+            logger.error(f"MCP server 初始化失敗: {mcp_error}")
+            logger.info("使用不需要 MCP 的備用模式")
+
+            try:
+                # 初始化記憶系統
+                await self.init_memory_system()
+
+                # 如果 agents 還沒創建，創建不需要 MCP 的版本
+                if self.triage_agent is None:
+                    await self.create_agents()
+
+                logger.info(f"啟動備用 triage_agent 進行任務分派")
 
                 # 設置 Task Plan Logging Hooks
                 hook = TaskPlanLoggingHooks()
 
-                # 將記憶上下文與當前問題組合
-                enhanced_input = question
-                if memory_context and memory_context.strip():
-                    enhanced_input = f"{memory_context}\n\n當前問題: {question}"
-                    logger.info(f" [MEMORY] 使用增強輸入，總長度: {len(enhanced_input)} 字符")
-                else:
-                    logger.info(f" [MEMORY] 沒有歷史記憶，使用原始問題")
                 result = await Runner.run(
-                        self.triage_agent,
-                        input=enhanced_input,  # 使用包含歷史的完整輸入
-                        max_turns=30,
-                        hooks=hook,
+                    self.triage_agent,
+                    input=question,
+                    max_turns=30,
+                    hooks=hook,
                 )
 
-
-                logger.info(f"Triage Agent 處理完成，結果類型: {type(result)}")
-                logger.info(f"完整 result 物件：{result}")
-
-                # 抽出最後的 assistant 回覆
-                if hasattr(result, "messages") and result.messages:
-                        logger.info(f"找到 messages，數量: {len(result.messages)}")
-                        for message in reversed(result.messages):
-                            if getattr(message, "role", None) == "assistant":
-                                logger.info(f"返回 assistant message: {message.content[:100]}...")
-                                return message.content
-                        logger.info(f"返回最後一條 message: {result.messages[-1].content[:100]}...")
-                        return result.messages[-1].content
-
+                # 處理結果
                 if hasattr(result, "final_output"):
-                        logger.info(f"返回 final_output: {result.final_output}")
+                    return result.final_output
+                elif hasattr(result, "content"):
+                    return result.content
+                else:
+                    return "系統目前無法處理您的請求，請稍後再試。"
 
-                        # 保存對話記憶
-                        try:
-                            await self.save_conversation(question, result.final_output)
-                            logger.info(f"對話記錄已保存")
-                        except Exception as e:
-                            logger.error(f"保存對話記憶失敗: {str(e)}")
-
-                        return result.final_output
-
-                if hasattr(result, "content"):
-                        logger.info(f"返回 content: {result.content}")
-
-                        # 保存對話記憶
-                        try:
-                            await self.save_conversation(question, result.content)
-                            logger.info(f"對話記錄已保存")
-                        except Exception as e:
-                            logger.error(f"保存對話記憶失敗: {str(e)}")
-
-                        return result.content
-
-            except RateLimitError as e:
-                    logger.error(f"RateLimitError: {e}")
-                    return "抱歉，AI 服務暫時無法使用，請稍後再試。就像《鋼之鍊金術師》中的等價交換法則一樣，我們需要補充能量才能繼續為您服務！\n\n來自... [鋼之鍊金術師]"
             except Exception as e:
-                    logger.error(f"執行錯誤: {e}", exc_info=True)
-                    return f"處理您的問題時遇到了困難，就像《Re:Zero》中的昴一樣，讓我們重新開始吧！\n\n來自... [Re:Zero]\n\n錯誤詳情: {str(e)}"
+                logger.error(f"備用模式也失敗: {e}", exc_info=True)
+                return f"系統遇到問題，無法處理您的請求。錯誤: {str(e)}"
 
 if __name__ == "__main__":
 
