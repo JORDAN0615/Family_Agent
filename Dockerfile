@@ -16,6 +16,7 @@ RUN apt-get update \
   && npm install -g @playwright/mcp \
   && npx playwright install chromium --with-deps \
   && npm cache clean --force \
+  && mkdir -p /root/.cache/ms-playwright \
   && ln -sf /usr/bin/npx /usr/local/bin/npx \
   && rm -rf /var/lib/apt/lists/*
 

@@ -495,7 +495,7 @@ class SimpleQA:
             async with MCPServerStdio(
                 name="Playwright MCP server",
                 params={"command": "npx", "args": ["-y", "@playwright/mcp"]},
-                client_session_timeout_seconds=120,  # 增加到 2 分鐘
+                client_session_timeout_seconds=300,  # 增加到 5 分鐘以支援 Cloud Run
             ) as server:
                 try:
                     # 初始化對話記憶資料庫
